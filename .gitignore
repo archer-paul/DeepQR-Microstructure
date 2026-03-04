@@ -1,0 +1,26 @@
+# Data and large files
+data/
+*.csv
+*.gz
+*.zip
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Notebooks and generated scripts
+.ipynb_checkpoints/
+_gen_nb.py
+
+# OS specific
+.DS_Store
+Thumbs.db
