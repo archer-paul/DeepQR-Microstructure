@@ -50,20 +50,20 @@ The full **MDQR model** represents the LOB as a unified multidimensional system.
 
 ## 3. Detailed Notebook Walkthrough
 
-### 📘 [01_data_and_qr_model.ipynb](01_data_and_qr_model.ipynb)
+### [01_data_and_qr_model.ipynb](01_data_and_qr_model.ipynb)
 - **Data Engineering**: Reconstructing LOBSTER message and orderbook files into a clean `State` representation.
 - **MLE Calibration**: Analytical derivation and implementation of the Maximum Likelihood Estimator for queue-dependent intensities.
 - **Simulator Engine**: Implementation of the **Gillespie algorithm** for event-by-event discrete simulation.
 - **Visuals**: Plots of fitted intensity functions across different stocks and price levels.
 
-### 📗 [02_dqr_model.ipynb](02_dqr_model.ipynb)
+### [02_dqr_model.ipynb](02_dqr_model.ipynb)
 - **Neural Calibration**: Transitioning from lookup tables to PyTorch-based MLPs for intensity prediction.
 - **Feature Enrichment**:
     - **Intraday Seasonality**: Capturing the "U-shaped" activity profile of trading days.
     - **Event Excitation**: Modeling how a market order at one level triggers cancellations or limits.
 - **Validation**: Quantitative comparison of model log-likelihood and balanced accuracy for next-event prediction.
 
-### 📕 [03_mdqr_model.ipynb](03_mdqr_model.ipynb)
+### [03_mdqr_model.ipynb](03_mdqr_model.ipynb)
 - **MDQR Architecture**: A multi-output neural network predicting 30 intensities simultaneously (3 event types $\times$ 10 levels).
 - **Order Size Network**: A 200-class categorical classifier trained to reproduce empirical order size distributions.
 - **Comprehensive Validation (Stylized Facts)**:
