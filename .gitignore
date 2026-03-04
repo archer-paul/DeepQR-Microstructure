@@ -24,3 +24,6 @@ _gen_nb.py
 # OS specific
 .DS_Store
 Thumbs.db
+
+#Other
+.claude
