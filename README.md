@@ -8,124 +8,89 @@
 
 ## 1. Project Overview
 
-This repository implements a progressive framework for simulating Limit Order Book (LOB) dynamics, moving from the classical **Queue-Reactive (QR)** model to the state-of-the-art **Multidimensional Deep Queue-Reactive (MDQR)** model. 
+This repository provides a comprehensive implementation of the Deep Queue-Reactive (DQR) and Multidimensional Deep Queue-Reactive (MDQR) frameworks for simulating Limit Order Book (LOB) dynamics. The work is based on the research by Bodor and Carlier (2025), which generalizes the classical Queue-Reactive model using deep learning architectures to capture high-dimensional dependencies and market stylized facts.
 
-The project is based on the research paper by **Hamza Bodor and Laurent Carlier (2025)**: *["Deep Learning Meets Queue-Reactive: A Framework for Realistic Limit Order Book Simulation"](https://arxiv.org/abs/2501.08822)*.
-
-Our implementation uses **LOBSTER** NASDAQ data (AAPL, INTC, GOOG, MSFT) as a proxy for the Bund futures analyzed in the original paper. We demonstrate how deep learning can generalize the QR framework to capture complex market microstructure phenomena while maintaining the interpretability of point-process models.
+The project demonstrates the transition from a lookup-table based point process (QR) to a neural network parameterization (DQR) and finally to a multidimensional joint model (MDQR) that incorporates cross-level interactions and realistic order size distributions. We utilize LOBSTER data for NASDAQ equities, specifically focusing on INTC as a representative large-tick asset to align with the characteristics of the Bund futures analyzed in the original paper.
 
 ### Key Contributions
-- **Neural Intensity Modeling**: Replacing lookup tables with MLPs to handle high-dimensional state spaces.
-- **Cross-Level Dependencies**: Jointly modeling multiple price levels to capture queue correlations.
-- **Order Size Modeling**: A categorical neural network to predict realistic order sizes.
-- **Stylized Facts Validation**: Verification of market impact, return distributions, and price formation.
+- Neural Intensity Parameterization: Employing Multi-Layer Perceptrons (MLPs) to estimate event arrival intensities in high-dimensional state spaces.
+- Multidimensional State Space: Relaxing the independence assumption between price levels to model cross-queue interactions.
+- Conditional Order Size Modeling: Implementing a categorical distribution model via neural networks to reproduce empirical order size patterns.
+- Empirical Validation: Extensive benchmarking against market stylized facts including the square-root law of market impact and inter-queue correlations.
 
 ---
 
-## 2. The Progressive Framework
+## 2. Theoretical Framework and Implementation
 
-We follow a three-step modeling approach, implemented across three main notebooks:
+The implementation is structured into three progressive stages, each detailed in a dedicated Jupyter Notebook.
 
-### Step 1: Queue-Reactive (QR) Model (Baseline)
-The foundation of our simulator is the **QR model** (Huang et al., 2015). It treats each queue size $q$ as a state and models event arrivals (Limit, Cancel, Market) as independent Poisson processes with intensities $\lambda^\eta(q)$.
-- **Notebook**: `01_data_and_qr_model.ipynb`
-- **Focus**: Data reconstruction, MLE estimation, Gillespie simulation.
+### Step 1: Queue-Reactive (QR) Baseline
+The foundational model follows the approach of Huang et al. (2015), where the LOB is represented as a set of independent queues. Event arrivals (Limit, Cancel, Market) are modeled as Poisson processes with intensities $\lambda^\eta(q)$ dependent on the local queue size $q$.
+- Notebook: 01_data_and_qr_model.ipynb
+- Methodology: Maximum Likelihood Estimation (MLE) of arrival intensities and simulation using the Gillespie (Discrete Event Simulation) algorithm.
+- Asset Selection: Transition from AAPL to INTC to better approximate the "large-tick" regime (where the spread is predominantly one tick), ensuring compatibility with the paper's findings on the Bund futures market.
 
-![QR Model Intensities](QR%20Model%20--%20Fitted%20Intensity%20Functions%20AAPL.png)
-*Example of fitted intensity functions for AAPL.*
+![QR Model Intensities](QR%20Model%20--%20Fitted%20Intensity%20Functions%20INTC.png)
+*Figure 1: Fitted arrival intensities for INTC across different event types and price levels.*
 
-### Step 2: Deep Queue-Reactive (DQR) Model
-The **DQR model** extends the QR framework by parameterizing intensities with neural networks $\lambda^\eta_\theta(x_k)$. This allows us to enrich the state vector $x_k$ with features like:
-- **Intraday Seasonality**: Hour of the day ($h_k$).
-- **Excitation Effects**: The type of the previous event ($\eta_{k-1}$).
-- **Notebook**: `02_dqr_model.ipynb`
-- **Focus**: Neural network calibration, feature importance, seasonality analysis.
+### Step 2: Deep Queue-Reactive (DQR) Extension
+The DQR model replaces lookup tables with neural networks, enabling the inclusion of exogenous and historical features into the state vector $x_k$.
+- Notebook: 02_dqr_model.ipynb
+- Feature Engineering: Integration of intraday seasonality (hour of the day) and event excitation (type of the preceding event) into the intensity estimation.
+- Analysis: Demonstrates how the DQR model captures the "U-shaped" activity profile and the clustering of events, significantly improving log-likelihood and next-event prediction accuracy over the baseline.
 
 ### Step 3: Multidimensional Deep Queue-Reactive (MDQR) Model
-The full **MDQR model** represents the LOB as a unified multidimensional system. It relaxes the independence assumption between queues and adds an explicit model for order sizes.
-- **Notebook**: `03_mdqr_model.ipynb`
-- **Focus**: Joint queue modeling, Order Size classification, Stylized Facts verification.
+The MDQR framework represents the LOB as a unified multidimensional system, jointly modeling all monitored price levels.
+- Notebook: 03_mdqr_model.ipynb
+- Model Architecture: A joint intensity network for $3 \times 2K$ event types and a separate categorical network for order size distribution $\{1, \dots, 200\}$.
+- Stylized Facts Verification:
+    - Market Impact: Validation of the concave price response and the square-root law of impact.
+    - Queue Correlations: Capturing the negative correlation between best bid and ask volumes and positive correlations within the same side of the book.
+    - Distributional Accuracy: Alignment of simulated queue sizes and returns with empirical distributions.
 
 ---
 
-## 3. Detailed Notebook Walkthrough
+## 3. Project Architecture
 
-### [01_data_and_qr_model.ipynb](01_data_and_qr_model.ipynb)
-- **Data Engineering**: Reconstructing LOBSTER message and orderbook files into a clean `State` representation.
-- **MLE Calibration**: Analytical derivation and implementation of the Maximum Likelihood Estimator for queue-dependent intensities.
-- **Simulator Engine**: Implementation of the **Gillespie algorithm** for event-by-event discrete simulation.
-- **Visuals**: Plots of fitted intensity functions across different stocks and price levels.
+The codebase is organized into modular components to support scalability and reproducibility:
 
-### [02_dqr_model.ipynb](02_dqr_model.ipynb)
-- **Neural Calibration**: Transitioning from lookup tables to PyTorch-based MLPs for intensity prediction.
-- **Feature Enrichment**:
-    - **Intraday Seasonality**: Capturing the "U-shaped" activity profile of trading days.
-    - **Event Excitation**: Modeling how a market order at one level triggers cancellations or limits.
-- **Validation**: Quantitative comparison of model log-likelihood and balanced accuracy for next-event prediction.
-
-### [03_mdqr_model.ipynb](03_mdqr_model.ipynb)
-- **MDQR Architecture**: A multi-output neural network predicting 30 intensities simultaneously (3 event types $\times$ 10 levels).
-- **Order Size Network**: A 200-class categorical classifier trained to reproduce empirical order size distributions.
-- **Comprehensive Validation (Stylized Facts)**:
-    - **Market Impact**: Reproducing the square-root law of price impact.
-    - **Cross-Queue Correlations**: Capturing the negative correlation between best bid/ask queues.
-    - **Queue Distributions**: Alignment with historical Gamma-like distributions.
-    - **Mid-Price Prediction**: Benchmarking against DeepLOB-style prediction tasks.
+- mle/: Modules for LOBSTER data parsing, state reconstruction, and MLE calibration.
+- models/: PyTorch implementations of the DQR and MDQR neural architectures.
+- simulator.py/: Discrete-event simulation engine based on the Gillespie algorithm.
+- state.py/: Object-oriented representation of the Limit Order Book state and event types.
+- intensities.py/: Implementation of intensity functions (analytical, DQR, and MDQR).
+- analysis.py/: Statistical tools for validating stylized facts and generating comparative visualizations.
 
 ---
 
-## 4. Validated Stylized Facts
-
-Our MDQR implementation successfully reproduces several key market microstructure properties:
-
-1.  **Market Impact Profile**: Demonstrates a concave price response to large meta-orders, consistent with the square-root law.
-2.  **Queue Correlations**: Unlike independent models, MDQR captures the interaction between different price levels.
-3.  **Order Size Patterns**: Correctly identifies "peaks" in order sizes at specific round lots (e.g., 1 lot, 100 lots).
-4.  **Excitation**: Correctly predicts event type transitions (e.g., Market order $\to$ Cancel/Limit).
-
----
-
-## 5. Project Architecture
-
-The core logic is modularized for reusability:
-
-- `mle/`: Statistical calibration tools and LOBSTER IO.
-- `models/`: PyTorch definitions for DQR and MDQR architectures.
-- `simulator.py`: The discrete-event engine implementing the Gillespie algorithm.
-- `analysis.py`: Tools for plotting heatmaps, impact profiles, and return distributions.
-- `state.py`: Efficient representation of the Limit Order Book state.
-- `intensities.py`: Abstract and concrete implementations of intensity functions.
-
----
-
-## 6. Setup & Usage
+## 4. Setup and Usage
 
 ### Prerequisites
 - Python 3.10+
-- PyTorch (CPU or GPU)
-- Standard DS stack: `pandas, numpy, matplotlib, scipy, scikit-learn`
+- PyTorch (compatible with CPU or CUDA)
+- Scientific Stack: pandas, numpy, matplotlib, scipy, scikit-learn
 
-### Quick Start
-1.  **Clone the repo**.
-2.  **Place data**: Put LOBSTER `.csv` files in the `data/` directory (following the provided sample structure).
-3.  **Run Notebooks**: Open the notebooks in order (01, 02, 03) to follow the training and evaluation pipeline.
+### Instructions
+1. Clone the repository.
+2. Data Placement: Ensure LOBSTER message and orderbook CSV files are located in the data/ directory.
+3. Execution: Run the notebooks in sequential order (01, 02, 03) to perform data preprocessing, model calibration, and simulation validation.
 
 ---
 
-## 7. Academic Context
+## 5. Academic Context
 
-*   **Institution:** Imperial College London
-*   **Module:** Market Microstructure
-*   **Supervised by:** Professor Mathieu Rosenbaum
+- Institution: Imperial College London
+- Module: Market Microstructure
+- Supervision: Professor Mathieu Rosenbaum
 
 ### Authors
-*   **Paul Archer** (CID: 06054057)
-*   **Thibault Marty** (CID: 06055275)
-*   **Rebecca Laïk** (CID: 01776263)
+- Paul Archer (CID: 06054057)
+- Thibault Marty (CID: 06055275)
+- Rebecca Laïk (CID: 01776263)
 
 ---
 
-## 8. References
-*   Bodor, H., & Carlier, L. (2025). *Deep Learning Meets Queue-Reactive: A Framework for Realistic Limit Order Book Simulation*. arXiv:2501.08822.
-*   Huang, W., Lehalle, C. A., & Rosenbaum, M. (2015). *Simulating and analyzing order book dynamics: the queue-reactive model*. Journal of Statistical Physics.
-*   LOBSTER Data: [https://lobsterdata.com/](https://lobsterdata.com/)
+## 6. References
+- Bodor, H., & Carlier, L. (2025). Deep Learning Meets Queue-Reactive: A Framework for Realistic Limit Order Book Simulation. arXiv:2501.08822.
+- Huang, W., Lehalle, C. A., & Rosenbaum, M. (2015). Simulating and analyzing order book dynamics: the queue-reactive model. Journal of Statistical Physics.
+- LOBSTER Data: https://lobsterdata.com/
