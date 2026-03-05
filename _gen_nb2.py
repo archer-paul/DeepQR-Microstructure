@@ -133,7 +133,7 @@ def preprocess_stock(msg, ob, K=5):
     df['mid_price'] = (df['pre_ask_px_1'].astype(float) + df['pre_bid_px_1'].astype(float)) / 2.0
 
     # Additional features for DQR (computed before filtering so shift(1) is coherent)
-    df['hour'] = ((df['time'] - MARKET_OPEN) / 3600).astype(int).clip(0, 8)  # 0..8
+    df['hour'] = ((df['time'] - MARKET_OPEN) / 3600).astype(int).clip(0, 6)  # 0..6 (9:30-16:00 → 7 slots)
     df['prev_event'] = df['event_type'].shift(1).fillna('L')
     df['prev_event_idx'] = df['prev_event'].map(EVENT_TO_IDX).fillna(0).astype(int)
 
@@ -145,7 +145,7 @@ def preprocess_stock(msg, ob, K=5):
     return df, df_clean
 
 # Load and preprocess
-PRIMARY = "AAPL"
+PRIMARY = "INTC"
 msg, ob = load_stock(PRIMARY, STOCKS[PRIMARY])
 df_all, df_clean = preprocess_stock(msg, ob, K=K)
 
@@ -366,14 +366,36 @@ cells.append(code("""def prepare_dqr_dataset(df_clean, level, K, aes_dict, featu
     aes = aes_dict.get(level, 1.0)
     q_norm = np.ceil(raw_q / max(aes, 1.0)).astype(float)
 
-    # Inter-event time within this queue
+    # Inter-event time within this queue (time since previous event AT THIS LEVEL)
     times = sub['time'].values
     dt_queue = np.diff(times, prepend=times[0])
     dt_queue[0] = dt_queue[1] if len(dt_queue) > 1 else 0.01  # handle first event
     dt_queue = np.clip(dt_queue, 1e-6, None)
 
+    # Following the paper: "partition the data into segments of constant reference
+    # price, resetting the inter-event time measurements when the reference price
+    # changes." When the BBO shifts (e.g. after a market order), the gap between
+    # the last event at the old price level and the first at the new level can be
+    # many seconds. These large dt values force Lambda -> 0 in the NLL loss
+    # (to keep Lambda*dt small), making predicted_dt = 1/Lambda -> inf and
+    # causing Time Rel.Diff% to blow up to astronomical values.
+    mid_prices = sub['mid_price'].values
+    ref_changed = np.concatenate([[True], mid_prices[1:] != mid_prices[:-1]])
+    stable_dt = dt_queue[~ref_changed]
+    dt_typical = float(np.median(stable_dt)) if len(stable_dt) > 0 else float(np.median(dt_queue))
+    dt_queue = np.where(ref_changed, dt_typical, dt_queue)
+    dt_queue = np.clip(dt_queue, 1e-6, None)
+
     # Event types
     event_types = sub['event_type'].map(EVENT_TO_IDX).values.astype(int)
+
+    # Level-specific previous event type: previous event AT THIS SAME LEVEL/QUEUE.
+    # This is the correct feature for capturing self-excitation (e.g. trade→trade).
+    # The global prev_event_idx (any level) is useless here: between two consecutive
+    # level-1 events, many events at other levels occur, so the global feature is
+    # almost always from a different level and does not carry level-specific information.
+    prev_et_level = sub['event_type'].shift(1).fillna('L')
+    prev_event_level_arr = prev_et_level.map(EVENT_TO_IDX).fillna(0).values.astype(int)
 
     # Build features based on configuration
     if features == 'vanilla':
@@ -383,17 +405,17 @@ cells.append(code("""def prepare_dqr_dataset(df_clean, level, K, aes_dict, featu
     elif features == 'hour':
         x_num = q_norm.reshape(-1, 1)
         x_cat = sub['hour'].values.reshape(-1, 1).astype(int)
-        cat_cards = [9]  # hours 0-8
+        cat_cards = [7]  # hours 0-6 only (LOBSTER 9:30-16:00 gives 7 slots)
     elif features == 'last_event':
         x_num = q_norm.reshape(-1, 1)
-        x_cat = sub['prev_event_idx'].values.reshape(-1, 1).astype(int)
+        x_cat = prev_event_level_arr.reshape(-1, 1)
         cat_cards = [3]  # L, C, M
     elif features == 'both':
         x_num = q_norm.reshape(-1, 1)
         hour_arr = sub['hour'].values.reshape(-1, 1).astype(int)
-        prev_arr = sub['prev_event_idx'].values.reshape(-1, 1).astype(int)
+        prev_arr = prev_event_level_arr.reshape(-1, 1)
         x_cat = np.hstack([hour_arr, prev_arr])
-        cat_cards = [9, 3]
+        cat_cards = [7, 3]  # hours 0-6, event types L/C/M
     else:
         raise ValueError(f"Unknown features: {features}")
 
@@ -419,7 +441,11 @@ cells.append(code("""def train_dqr(x_num, x_cat, event_types, delta_t, cat_cardi
     model : trained DQRNet
     history : dict with training/validation losses
     \"\"\"
-    # Train/val split
+    # Random 80/20 train/val split.
+    # A temporal (chronological) split would exclude end-of-day patterns from training
+    # entirely when we only have 1 day of data. The intensity NLL treats each sample
+    # (q_k, eta_k, dt_k) as conditionally independent given its state, so a random
+    # shuffle does not introduce data leakage for this calibration objective.
     n = len(x_num)
     n_val = int(n * val_fraction)
     n_train = n - n_val
@@ -452,9 +478,13 @@ cells.append(code("""def train_dqr(x_num, x_cat, event_types, delta_t, cat_cardi
     ).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=lr_max)
+    # step_size_up = 2 * batches_per_epoch: standard recommendation for CyclicLR.
+    # scheduler.step() is called once per batch, so step_size_up controls how many
+    # batches form the ascending half of one LR cycle (~4 epochs per full cycle).
+    n_batches_per_epoch = max(1, (n_train + batch_size - 1) // batch_size)
     scheduler = optim.lr_scheduler.CyclicLR(
         optimizer, base_lr=lr_min, max_lr=lr_max,
-        step_size_up=5, mode='triangular2', cycle_momentum=False
+        step_size_up=2 * n_batches_per_epoch, mode='triangular2', cycle_momentum=False
     )
 
     history = {'train_loss': [], 'val_loss': []}
@@ -463,9 +493,8 @@ cells.append(code("""def train_dqr(x_num, x_cat, event_types, delta_t, cat_cardi
     patience_counter = 0
 
     for epoch in range(epochs):
-        # Training
+        # Training pass
         model.train()
-        train_losses = []
         indices = torch.randperm(n_train, device=device)
 
         for start in range(0, n_train, batch_size):
@@ -485,15 +514,22 @@ cells.append(code("""def train_dqr(x_num, x_cat, event_types, delta_t, cat_cardi
             optimizer.step()
             scheduler.step()
 
-            train_losses.append(loss.item())
-
-        # Validation
+        # Evaluate train AND val with the same final model weights (post-epoch).
+        # Computing train loss on-the-fly during training mixes losses from an evolving
+        # model: early batches see a bad model, late batches see a good one. This makes
+        # avg_train >> val_loss at epoch 0 and produces the misleading "val rises from
+        # below train" artifact. Post-epoch evaluation on both sets is the correct way.
         model.eval()
         with torch.no_grad():
-            intensities_v = model(x_num_v, xc_v)
-            val_loss = dqr_loss(intensities_v, et_v, dt_v).item()
+            # Subsample training set for speed (capped at 10 000 samples)
+            n_eval = min(n_train, 10000)
+            eval_idx = torch.randperm(n_train, device=device)[:n_eval]
+            xn_ev = x_num_t[eval_idx]
+            xc_ev = xc_t[eval_idx] if xc_t is not None else None
+            avg_train = dqr_loss(model(xn_ev, xc_ev), et_t[eval_idx], dt_t[eval_idx]).item()
 
-        avg_train = np.mean(train_losses)
+            val_loss = dqr_loss(model(x_num_v, xc_v), et_v, dt_v).item()
+
         history['train_loss'].append(avg_train)
         history['val_loss'].append(val_loss)
 
@@ -534,8 +570,8 @@ cells.append(code("""# Train all four configurations
 configs = {
     'vanilla': 'Vanilla ($q_k$)',
     'hour': 'Hour ($q_k, h_k$)',
-    'last_event': 'Last event ($q_k, \\eta_{k-1}$)',
-    'both': 'Both ($q_k, h_k, \\eta_{k-1}$)',
+    'last_event': 'Last event ($q_k, \\\\eta_{k-1}$)',
+    'both': 'Both ($q_k, h_k, \\\\eta_{k-1}$)',
 }
 
 models = {}
@@ -553,7 +589,7 @@ for config_name, config_label in configs.items():
 
     model, history = train_dqr(
         x_num, x_cat, et, dt, cards,
-        epochs=200, batch_size=4096, patience=10, verbose=True
+        epochs=200, batch_size=4096, patience=20, verbose=True
     )
 
     models[config_name] = model
@@ -562,14 +598,25 @@ for config_name, config_label in configs.items():
 print("\\nAll configurations trained!")"""))
 
 cells.append(code("""# --- Plot learning curves ---
+def smooth_curve(y, w=5):
+    \"\"\"Rolling-average smoothing for cleaner learning curve visualization.\"\"\"
+    return pd.Series(y).rolling(w, center=True, min_periods=1).mean().values
+
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 for ax, (config_name, config_label) in zip(axes.flat, configs.items()):
     h = histories[config_name]
-    ax.plot(h['train_loss'], label='Train', alpha=0.8)
-    ax.plot(h['val_loss'], label='Validation', alpha=0.8)
+    n_ep = len(h['train_loss'])
+    epochs_x = range(n_ep)
+    # Raw curves (faint) + 5-epoch rolling average (solid)
+    ax.plot(epochs_x, h['train_loss'], alpha=0.2, color='C0')
+    ax.plot(epochs_x, h['val_loss'],   alpha=0.2, color='C1')
+    ax.plot(epochs_x, smooth_curve(h['train_loss']), label='Train (smoothed)',
+            color='C0', lw=2)
+    ax.plot(epochs_x, smooth_curve(h['val_loss']),   label='Val (smoothed)',
+            color='C1', lw=2)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Negative Log-Likelihood")
-    ax.set_title(config_label)
+    ax.set_title(f"{config_label}  (stopped @ ep {n_ep})")
     ax.legend()
 
 plt.suptitle("DQR Learning Curves", fontsize=14, y=1.02)
@@ -703,23 +750,33 @@ To demonstrate excitation, we simulate events using the DQR model with the "both
 
 The key insight: by including $\eta_{k-1}$ in the state, the model learns that a cancel is more likely after a cancel, a limit after a limit, etc. The QR model (without $\eta_{k-1}$) cannot capture this."""))
 
-cells.append(code("""def simulate_dqr(model, initial_q, n_events, K, aes_dict, features='both',
-                  seed=42):
+cells.append(code("""def simulate_dqr(model, initial_q, emp_q_dist, n_events, K, aes_dict,
+                  features='both', hour=4, seed=42):
     \"\"\"
     Simulate events using a trained DQR model for a single queue.
+
+    Parameters
+    ----------
+    initial_q : float
+        Starting normalized queue size. Should be the empirical median of the
+        training distribution so the simulation stays in-distribution.
+    emp_q_dist : np.ndarray
+        Empirical distribution of normalized queue sizes from training data.
+        Used to reset the queue when it hits 0 (price level change).
+    hour : int
+        Hour of day for the simulation (0-8). Default=4 (midday).
     \"\"\"
     rng = np.random.default_rng(seed)
     model.eval()
 
-    q = initial_q
-    prev_event = 0  # L
-    hour = 0
+    q = float(initial_q)
+    prev_event = 0  # start with L as previous event
     events_log = []
 
     for step in range(n_events):
-        # Build features
-        q_norm = max(1.0, float(q))
-        x_num = np.array([[q_norm]], dtype=np.float32)
+        # Build features — keep q in training range
+        q_clipped = float(np.clip(q, 1, 200))
+        x_num = np.array([[q_clipped]], dtype=np.float32)
 
         if features == 'vanilla':
             x_cat = None
@@ -735,86 +792,112 @@ cells.append(code("""def simulate_dqr(model, initial_q, n_events, K, aes_dict, f
             xc = torch.tensor(x_cat, dtype=torch.long).to(device) if x_cat is not None else None
             intensities = model(xn, xc).cpu().numpy()[0]  # (3,)
 
-        # Ensure non-negative and handle empty queue
-        intensities = np.maximum(intensities, 0)
+        # Ensure non-negative; suppress C/M if queue is empty
+        intensities = np.maximum(intensities, 1e-10)
         if q <= 0:
             intensities[1] = 0  # no cancel
             intensities[2] = 0  # no market order
 
         Lambda = intensities.sum()
-        if Lambda <= 0:
-            intensities[0] = 1.0  # force limit order
+        if Lambda <= 1e-10:
+            intensities[0] = 1.0
             Lambda = 1.0
 
-        # Sample event type
         probs = intensities / Lambda
-        event_type = rng.choice(3, p=probs)
+        event_type = int(rng.choice(3, p=probs))
 
         # Update queue
         if event_type == 0:  # L
-            q += 1
+            q += 1.0
         else:  # C or M
-            q = max(q - 1, 0)
+            q = max(q - 1.0, 0.0)
+
+        # Queue depletion = price level change: reset from empirical distribution
+        if q <= 0:
+            q = float(rng.choice(emp_q_dist))
+            prev_event = 0  # treat as fresh start (no previous event at new level)
+        else:
+            prev_event = event_type
 
         events_log.append(event_type)
-        prev_event = event_type
 
     return events_log
 
+# Compute empirical q distribution from training data (for in-distribution simulation)
+_x_tmp, _, _, _, _ = prepare_dqr_dataset(df_clean, level=TARGET_LEVEL, K=K,
+                                           aes_dict=aes_dict, features='vanilla')
+emp_q_train = _x_tmp[:, 0]
+initial_q = float(np.median(emp_q_train))
+print(f"Training q_norm: min={emp_q_train.min():.1f}, median={initial_q:.1f}, "
+      f"max={emp_q_train.max():.1f}")
+
 # Simulate with 'both' features (DQR) and without (vanilla = QR-like)
 n_sim = 200000
-initial_q = 10
 
-sim_events_dqr = simulate_dqr(models['both'], initial_q, n_sim, K, aes_dict,
-                                features='both', seed=42)
-sim_events_vanilla = simulate_dqr(models['vanilla'], initial_q, n_sim, K, aes_dict,
-                                    features='vanilla', seed=42)
+sim_events_dqr = simulate_dqr(models['both'], initial_q, emp_q_train, n_sim, K, aes_dict,
+                                features='both', hour=4, seed=42)
+sim_events_vanilla = simulate_dqr(models['vanilla'], initial_q, emp_q_train, n_sim, K, aes_dict,
+                                    features='vanilla', hour=4, seed=42)
 
-# Historical
-hist_events = df_clean[df_clean['level'] == 1]['event_type'].map(EVENT_TO_IDX).values
+# Convert simulation output (int indices: 0=L, 1=C, 2=M) back to string labels
+# so we can reuse the exact same compute/plot functions as Notebook 1.
+IDX_TO_EVENT = {0: 'L', 1: 'C', 2: 'M'}
+sim_events_vanilla_str = [IDX_TO_EVENT[e] for e in sim_events_vanilla]
+sim_events_dqr_str     = [IDX_TO_EVENT[e] for e in sim_events_dqr]
 
-# Compute transition matrices
-def compute_transition_matrix_from_idx(events_idx, n_types=3):
-    mat = np.zeros((n_types, n_types))
-    events = np.array(events_idx)
-    for k in range(len(events) - 1):
-        mat[events[k], events[k+1]] += 1
-    row_sums = mat.sum(axis=1, keepdims=True)
+# --- Identical helpers as Notebook 1 ---
+def compute_transition_matrix(event_types, labels=['C', 'L', 'M']):
+    n = len(labels)
+    label_to_idx = {l: i for i, l in enumerate(labels)}
+    matrix = np.zeros((n, n), dtype=float)
+    types = np.array(event_types)
+    for k in range(len(types) - 1):
+        i = label_to_idx.get(types[k])
+        j = label_to_idx.get(types[k+1])
+        if i is not None and j is not None:
+            matrix[i, j] += 1
+    row_sums = matrix.sum(axis=1, keepdims=True)
     row_sums[row_sums == 0] = 1
-    return mat / row_sums
+    matrix /= row_sums
+    return matrix
 
-P_real = compute_transition_matrix_from_idx(hist_events)
-P_vanilla = compute_transition_matrix_from_idx(sim_events_vanilla)
-P_dqr = compute_transition_matrix_from_idx(sim_events_dqr)
+def plot_transition_matrices(matrices, titles, labels=['cancel', 'limit', 'trade']):
+    n = len(matrices)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 5))
+    if n == 1:
+        axes = [axes]
+    for ax, mat, title in zip(axes, matrices, titles):
+        im = ax.imshow(mat, cmap='viridis', vmin=0, vmax=0.8, aspect='equal')
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, fontsize=10)
+        ax.set_yticks(range(len(labels)))
+        ax.set_yticklabels(labels, fontsize=10)
+        ax.set_xlabel("New event")
+        ax.set_ylabel("Old event")
+        ax.set_title(title, fontsize=12)
+        ax.grid(False)
+        for i in range(len(labels)):
+            for j in range(len(labels)):
+                text_color = 'black' if mat[i, j] > 0.55 else 'white'
+                ax.text(j, i, f"{mat[i, j]:.2f}", ha='center', va='center',
+                        fontsize=11, color=text_color)
+    fig.colorbar(im, ax=axes[-1], shrink=0.8, fraction=0.046, pad=0.04)
+    plt.suptitle("Transition Matrix of Events (cf. Figure 1)", fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()
 
-# Plot (Figure 1)
-labels = ['cancel', 'limit', 'trade']
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+# Historical: same filter as Notebook 1 (unsigned level == 1, both bid and ask)
+hist_events_best = df_clean[df_clean['level'] == 1]['event_type'].values
+P_hist    = compute_transition_matrix(hist_events_best,    labels=['C', 'L', 'M'])
+P_vanilla = compute_transition_matrix(sim_events_vanilla_str, labels=['C', 'L', 'M'])
+P_dqr     = compute_transition_matrix(sim_events_dqr_str,     labels=['C', 'L', 'M'])
 
-for ax, mat, title in zip(axes,
-                            [P_real, P_vanilla, P_dqr],
-                            ['Real', 'QR (Vanilla DQR)', 'DQR ($q_k, h_k, \\eta_{k-1}$)']):
-    # Reorder: paper uses C, L, M order -> indices 1, 0, 2
-    reorder = [1, 0, 2]
-    mat_reordered = mat[np.ix_(reorder, reorder)]
-
-    im = ax.imshow(mat_reordered, cmap='YlOrRd', vmin=0, vmax=0.8, aspect='equal')
-    ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=10)
-    ax.set_yticks(range(3))
-    ax.set_yticklabels(labels, fontsize=10)
-    ax.set_xlabel("New event")
-    ax.set_ylabel("Old event")
-    ax.set_title(title, fontsize=12)
-    for i in range(3):
-        for j in range(3):
-            ax.text(j, i, f"{mat_reordered[i,j]:.2f}", ha='center', va='center',
-                   fontsize=11, color='white' if mat_reordered[i,j] > 0.4 else 'black')
-
-plt.colorbar(im, ax=axes, shrink=0.8)
-plt.suptitle("Transition Matrix of Events (cf. Figure 1)", fontsize=14, y=1.02)
-plt.tight_layout()
-plt.show()"""))
+plot_transition_matrices(
+    [P_hist, P_vanilla, P_dqr],
+    ['Real (Historical)', 'QR (Vanilla DQR, cf. Fig. 1b)',
+     'DQR ($q_k, h_k, \\\\eta_{k-1}$, cf. Fig. 1c)'],
+    labels=['cancel', 'limit', 'trade']
+)"""))
 
 # ==============================================================================
 # SECTION 8: Intraday Seasonality (Figure 2)
@@ -824,53 +907,86 @@ cells.append(md(r"""---
 
 By including the hour $h_k$ in the state vector, the DQR model can learn different intensity patterns for different times of the day. We compare the average market order intensity across trading hours between the QR model (which produces a flat line) and the DQR model (which captures the U-shape)."""))
 
+cells.append(code("""# Diagnostic: event counts per hour at TARGET_LEVEL (ask side)
+# Helps verify there is sufficient data for each hour (important for hour embedding quality)
+hour_slot_labels = [
+    "9:30-10:30", "10:30-11:30", "11:30-12:30", "12:30-13:30",
+    "13:30-14:30", "14:30-15:30", "15:30-16:00"
+]
+print(f"Event distribution per hour at signed_level={TARGET_LEVEL}:")
+print(f"  {'Hour':<20} {'Limit':>8} {'Cancel':>8} {'Market':>8} {'Total':>8}")
+for h in range(7):
+    sub_h = df_clean[(df_clean['hour'] == h) & (df_clean['signed_level'] == TARGET_LEVEL)]
+    nL = int((sub_h['event_type'] == 'L').sum())
+    nC = int((sub_h['event_type'] == 'C').sum())
+    nM = int((sub_h['event_type'] == 'M').sum())
+    print(f"  {hour_slot_labels[h]:<20} {nL:>8} {nC:>8} {nM:>8} {nL+nC+nM:>8}")"""))
+
 cells.append(code("""# Compute average market order intensity per hour
-# DQR model with hour feature
+# Key: evaluate the model at REPRESENTATIVE q values from the TRAINING DISTRIBUTION.
+# Using out-of-distribution q (e.g. q=1..29 when training data has q=35..55) would
+# give meaningless outputs due to MLP extrapolation.
+
 model_hour = models['hour']
 model_hour.eval()
 
-hours = list(range(9))  # 0..8 corresponding to 9:30..16:00+
+# Build a representative sample of q values from the training data
+_x_h, _, _, _, _ = prepare_dqr_dataset(df_clean, level=TARGET_LEVEL, K=K,
+                                         aes_dict=aes_dict, features='vanilla')
+q_train_vals = _x_h[:, 0]
+# 80 evenly-spaced percentiles cover the bulk of the distribution
+q_rep = np.percentile(q_train_vals, np.linspace(5, 95, 80)).astype(np.float32).reshape(-1, 1)
+print(f"Representative q range: [{q_rep.min():.1f}, {q_rep.max():.1f}]")
+
+hours = list(range(7))  # 0..6 = 9:30-10:30 .. 15:30-16:00 (7 one-hour slots in LOBSTER)
 avg_intensity_dqr = []
 avg_intensity_qr = []
 
 for h in hours:
-    # Sample a range of queue sizes
-    q_values = np.arange(1, 30, dtype=np.float32).reshape(-1, 1)
-    n_q = len(q_values)
-
-    # DQR prediction
+    # DQR prediction at fixed representative q, varying hour
     with torch.no_grad():
-        xn = torch.tensor(q_values, dtype=torch.float32).to(device)
-        xc = torch.tensor(np.full((n_q, 1), h, dtype=np.int64)).to(device)
+        xn = torch.tensor(q_rep, dtype=torch.float32).to(device)
+        xc = torch.tensor(np.full((len(q_rep), 1), h, dtype=np.int64)).to(device)
         intensities = model_hour(xn, xc).cpu().numpy()  # (n_q, 3)
-        avg_intensity_dqr.append(intensities[:, 2].mean())  # market order intensity
+        avg_intensity_dqr.append(float(intensities[:, 2].mean()))  # lambda_M
 
-    # QR (vanilla) prediction - constant across hours
+    # QR (vanilla) prediction -- no hour feature, should be approximately flat
     with torch.no_grad():
-        xn = torch.tensor(q_values, dtype=torch.float32).to(device)
+        xn = torch.tensor(q_rep, dtype=torch.float32).to(device)
         intensities_v = models['vanilla'](xn, None).cpu().numpy()
-        avg_intensity_qr.append(intensities_v[:, 2].mean())
+        avg_intensity_qr.append(float(intensities_v[:, 2].mean()))
 
-# Historical average intensity per hour
+# Historical average market-order intensity per hour
+# Use actual hour duration (not sum of per-event dt which underestimates total time)
 hist_intensity = []
 for h in hours:
-    sub = df_clean[(df_clean['hour'] == h) & (df_clean['level'] == 1)]
-    n_market = (sub['event_type'] == 'M').sum()
-    total_time = sub['dt'].sum()
-    hist_intensity.append(n_market / max(total_time, 1))
+    sub_h = df_clean[(df_clean['hour'] == h) & (df_clean['signed_level'] == TARGET_LEVEL)]
+    n_market = int((sub_h['event_type'] == 'M').sum())
+    # Hour h: from MARKET_OPEN + h*3600 to min(MARKET_OPEN + (h+1)*3600, MARKET_CLOSE)
+    t_start = MARKET_OPEN + h * 3600
+    t_end   = min(MARKET_OPEN + (h + 1) * 3600, MARKET_CLOSE)
+    total_time = float(t_end - t_start)
+    hist_intensity.append(n_market / max(total_time, 1.0))
 
-hour_labels = [f"{9 + h//2}:{30*(h%2):02d}" if h < 8 else "16:00" for h in range(9)]
+# Labels for each 1-hour slot
+hour_labels = [
+    "9:30-10:30\\n(Open)", "10:30-11:30", "11:30-12:30",
+    "12:30-13:30\\n(Lunch)", "13:30-14:30", "14:30-15:30",
+    "15:30-16:00\\n(Close)"
+]
 
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(hours, hist_intensity, 'ko-', linewidth=2, label='Historical', markersize=6)
-ax.plot(hours, avg_intensity_dqr, 'r^--', linewidth=2, label='DQR (with hour)', markersize=6)
-ax.plot(hours, avg_intensity_qr, 'bs:', linewidth=2, label='QR (no hour)', markersize=6)
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.plot(hours, hist_intensity, 'ko-', linewidth=2, label='Historical', markersize=7)
+ax.plot(hours, avg_intensity_dqr, 'r^--', linewidth=2,
+        label=r'DQR (with $h_k$)', markersize=7)
+ax.plot(hours, avg_intensity_qr, 'bs:', linewidth=2, label='QR (no hour)', markersize=7)
 ax.set_xlabel("Hour of Day")
-ax.set_ylabel("Average Market Order Intensity (events/s)")
+ax.set_ylabel(r"Average Market Order Intensity [s$^{-1}$]")
 ax.set_xticks(hours)
-ax.set_xticklabels(hour_labels, rotation=45)
-ax.set_title("Average Market Order Intensity per Hour (cf. Figure 2)")
+ax.set_xticklabels(hour_labels, fontsize=9)
+ax.set_title("Intraday Seasonality: DQR vs QR (cf. Figure 2)")
 ax.legend()
+ax.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()"""))
 
