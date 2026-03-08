@@ -544,3 +544,57 @@ def plot_three_heatmaps(T_real, T_qr, T_dqr, labels=None, dqr_title=r"DQR"):
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     return fig
+
+@torch.no_grad()
+def compute_hourly_intensity(model, data, hour_values):
+    model.eval()
+
+    # Forward according to model type
+    if model.use_hour and model.use_last_event:
+        lambdas = model(
+            data["q"],
+            last_event=data["last_event"],
+            hour=data["hour_id"]
+        )
+
+    elif model.use_hour:
+        lambdas = model(
+            data["q"],
+            hour=data["hour_id"]
+        )
+
+    elif model.use_last_event:
+        lambdas = model(
+            data["q"],
+            last_event=data["last_event"]
+        )
+
+    else:
+        lambdas = model(data["q"])
+
+    lambdas = lambdas.cpu().numpy()
+
+    df_plot = pd.DataFrame({
+        "hour_id": hour_values,
+        "lambda_limit": lambdas[:, 0],
+        "lambda_cancel": lambdas[:, 1],
+        "lambda_trade": lambdas[:, 2]
+    })
+
+    hourly = df_plot.groupby("hour_id")["lambda_trade"].mean()
+
+    return hourly
+
+def compute_real_hourly_intensity(df, trade_id=2):
+    df_real = df.copy()
+
+    # total observation time per hour
+    total_time = df_real.groupby("hour")["dtk_l"].sum()
+
+    # number of trade events per hour
+    n_trades = (df_real["event_id"] == trade_id).groupby(df_real["hour"]).sum()
+
+    # empirical intensity = count / total time
+    lambda_real = n_trades / total_time
+
+    return lambda_real
