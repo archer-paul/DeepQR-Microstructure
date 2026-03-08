@@ -507,3 +507,40 @@ def plot_two_heatmaps(T_real, T_dqr, labels=None, dqr_title=r"DQR"):
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     return fig
+import matplotlib.patheffects as pe
+
+def plot_three_heatmaps(T_real, T_qr, T_dqr, labels=None, dqr_title=r"DQR"):
+
+    if labels is None:
+        labels = [str(i) for i in range(T_real.shape[0])]
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4), constrained_layout=True)
+
+    titles = [
+        r"Real",
+        r"QR",
+        dqr_title
+    ]
+
+    for ax, T, title in zip(axes, [T_real, T_qr, T_dqr], titles):
+
+        im = ax.imshow(T, aspect="equal")
+
+        ax.set_title(title)
+        ax.set_xticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_yticks(range(len(labels)))
+        ax.set_yticklabels(labels)
+
+        for i in range(T.shape[0]):
+            for j in range(T.shape[1]):
+                ax.text(
+                    j, i, f"{T[i,j]:.2f}",
+                    ha="center", va="center",
+                    color="white", fontweight="bold", fontsize=9,
+                    path_effects=[pe.withStroke(linewidth=1.5, foreground="black")]
+                )
+
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    return fig
