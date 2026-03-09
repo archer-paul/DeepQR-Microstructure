@@ -33,8 +33,6 @@ fig*.pdf
 02_dqr_model-v2.ipynb
 03_mdqr_model-clear.ipynb
 intensities.py
-mle/
-models/
 02_Transition_Matrix_of_Events.png
 02_dqr_leraning_curves.png
 02_intraday_seasonality.png
