@@ -16,14 +16,14 @@ DATA STRUCTURES AND MODEL DEFINITION (CLASS AND LOSS FUNCTION)
 # Build training dataset for NN model in PyTorch
 def build_dataset(df, use_hour=False, use_last_event=False):
     data = {
-        "q": torch.tensor(df["q_event"].values, dtype=torch.float32),
+        "q": torch.tensor(df["q_before_event"].values, dtype=torch.float32),
         "y": torch.tensor(df["event_id"].values, dtype=torch.long),
         "dt":torch.tensor(df["dtk_l"].values, dtype=torch.float32)    
     }
     if use_last_event:
         data["last_event"] = torch.tensor(df["last_event_id"].values, dtype=torch.long)
     if use_hour:
-        data["hour_id"] = torch.tensor(df["hour_id"].values, dtype=torch.long)
+        data["hour_id"] = torch.tensor(df["hour_last_event"].values, dtype=torch.long)
     return data
 
 
@@ -521,10 +521,13 @@ def plot_three_heatmaps(T_real, T_qr, T_dqr, labels=None, dqr_title=r"DQR"):
         r"QR",
         dqr_title
     ]
-
+    
+    vmin = min([T_real.flatten().min(), T_qr.flatten().min(), T_dqr.flatten().min()])
+    vmax = max([T_real.flatten().max(), T_qr.flatten().max(), T_dqr.flatten().max()])
+    
     for ax, T, title in zip(axes, [T_real, T_qr, T_dqr], titles):
 
-        im = ax.imshow(T, aspect="equal")
+        im = ax.imshow(T, aspect="equal", vmin=vmin, vmax=vmax)
 
         ax.set_title(title)
         ax.set_xticks(range(len(labels)))
@@ -589,10 +592,10 @@ def compute_real_hourly_intensity(df, trade_id=2):
     df_real = df.copy()
 
     # total observation time per hour
-    total_time = df_real.groupby("hour")["dtk_l"].sum()
+    total_time = df_real.groupby("hour_last_event")["dtk_l"].sum()
 
     # number of trade events per hour
-    n_trades = (df_real["event_id"] == trade_id).groupby(df_real["hour"]).sum()
+    n_trades = (df_real["event_id"] == trade_id).groupby(df_real["hour_last_event"]).sum()
 
     # empirical intensity = count / total time
     lambda_real = n_trades / total_time
