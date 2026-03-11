@@ -548,6 +548,7 @@ def plot_three_heatmaps(T_real, T_qr, T_dqr, labels=None, dqr_title=r"DQR"):
 
     return fig
 
+
 @torch.no_grad()
 def compute_hourly_intensity(model, data, hour_values):
     model.eval()
@@ -559,32 +560,42 @@ def compute_hourly_intensity(model, data, hour_values):
             last_event=data["last_event"],
             hour=data["hour_id"]
         )
-
     elif model.use_hour:
         lambdas = model(
             data["q"],
             hour=data["hour_id"]
         )
-
     elif model.use_last_event:
         lambdas = model(
             data["q"],
             last_event=data["last_event"]
         )
-
     else:
         lambdas = model(data["q"])
 
     lambdas = lambdas.cpu().numpy()
+    
+    # Il faut récupérer les dt pour pondérer l'intensité
+    dts = data["dt"].cpu().numpy()
 
     df_plot = pd.DataFrame({
         "hour_id": hour_values,
         "lambda_limit": lambdas[:, 0],
         "lambda_cancel": lambdas[:, 1],
-        "lambda_trade": lambdas[:, 2]
+        "lambda_trade": lambdas[:, 2],
+        "dt": dts  # Ajout de l'intervalle de temps
     })
 
-    hourly = df_plot.groupby("hour_id")["lambda_trade"].mean()
+    # Calcul du nombre d'événements attendus par le modèle (lambda * dt)
+    df_plot["expected_trades"] = df_plot["lambda_trade"] * df_plot["dt"]
+    df_plot["expected_limits"] = df_plot["lambda_limit"] * df_plot["dt"]
+    df_plot["expected_cancels"] = df_plot["lambda_cancel"] * df_plot["dt"]
+
+    # Agrégation pondérée par le temps
+    grouped = df_plot.groupby("hour_id")
+    
+    # Intensité horaire = (Somme des événements attendus) / (Somme des dt)
+    hourly = grouped["expected_trades"].sum() / grouped["dt"].sum()
 
     return hourly
 
@@ -601,3 +612,118 @@ def compute_real_hourly_intensity(df, trade_id=2):
     lambda_real = n_trades / total_time
 
     return lambda_real
+
+
+"""
+COMPARISON OF MODEL 'S FUNCTIONS
+"""
+
+@torch.no_grad()
+def predict_lambdas(model, data, batch_size=4096):
+    model.eval()
+    N = data["q"].shape[0]
+    out = torch.empty((N, 3), dtype=torch.float32)
+
+    for s in range(0, N, batch_size):
+        q_batch = data["q"][s:s+batch_size]
+
+        if model.use_hour and model.use_last_event:
+            hour_batch = data["hour_id"][s:s+batch_size]
+            last_event_batch = data["last_event"][s:s+batch_size]
+            lambdas = model(q_batch, last_event=last_event_batch, hour=hour_batch)
+
+        elif model.use_last_event:
+            last_event_batch = data["last_event"][s:s+batch_size]
+            lambdas = model(q_batch, last_event=last_event_batch)
+
+        elif model.use_hour:
+            hour_batch = data["hour_id"][s:s+batch_size]
+            lambdas = model(q_batch, hour=hour_batch)
+
+        else:
+            lambdas = model(q_batch)
+
+        out[s:s+batch_size] = lambdas.cpu()
+
+    return out.numpy()
+
+
+def balanced_accuracy_numpy(y_true, y_pred, n_classes=3):
+    recalls = []
+    for c in range(n_classes):
+        mask = (y_true == c)
+        if mask.sum() == 0:
+            continue
+        recalls.append((y_pred[mask] == c).mean())
+    return float(np.mean(recalls))
+
+
+def evaluate_dqr_model(model, data, eps=1e-12):
+    lambdas = predict_lambdas(model, data)                 # shape (N,3)
+    y_true = data["y"].cpu().numpy()
+    dt_true = data["dt"].cpu().numpy()
+
+    Lambda = lambdas.sum(axis=1)                          # total intensity
+    chosen_lambda = lambdas[np.arange(len(y_true)), y_true]
+
+    # 1) mean log-likelihood per observation (higher is better)
+    loglik = np.mean(np.log(chosen_lambda + eps) - Lambda * dt_true)
+
+    # 2) next-event prediction
+    y_pred = np.argmax(lambdas, axis=1)
+    bal_acc = balanced_accuracy_numpy(y_true, y_pred, n_classes=3)
+
+    # 3) time-to-next-event relative difference (WMAPE)
+    dt_pred = 1.0 / np.maximum(Lambda, eps)
+    
+    # Calcul de la Mean Absolute Error (MAE)
+    mae = np.mean(np.abs(dt_pred - dt_true))
+    # Division par le temps d'attente moyen réel
+    mean_true = np.mean(dt_true)
+    
+    rel_diff = (mae / np.maximum(mean_true, eps)) * 100.0
+    return {
+        "loglik": float(loglik),
+        "bal_acc": float(bal_acc),
+        "rel_diff_pct": float(rel_diff),
+    }
+    
+def plot_model_comparison(results):
+    model_names = list(results.keys())
+    model_colors = {
+        "Vanilla": "#1f77b4",
+        "Hour": "#ff7f0e",
+        "Last event": "#2ca02c",
+        "Hour + Last event": "#d62728",
+    }
+    colors= [model_colors[m] for m in model_names]
+
+    loglik = [results[m]["loglik"] for m in model_names]
+    balacc = [results[m]["bal_acc"] for m in model_names]
+    reldiff = [results[m]["rel_diff_pct"] for m in model_names]
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
+
+    axes[0].bar(model_names, loglik, color=colors)
+    axes[0].set_title("Log-likelihood")
+    axes[0].set_ylabel("Mean log-likelihood")
+    axes[0].set_xlabel("(Higher is better)")
+    axes[0].grid(axis="y", alpha=0.3)
+
+    axes[1].bar(model_names, balacc, color=colors)
+    axes[1].set_title("Next event prediction\nBalanced accuracy")
+    axes[1].set_ylabel("Balanced accuracy")
+    axes[1].set_xlabel("(Higher is better)")
+    axes[1].grid(axis="y", alpha=0.3)
+
+    axes[2].bar(model_names, reldiff, color=colors)
+    axes[2].set_title("Time to next event\n(Relative Difference (%))")
+    axes[2].set_ylabel("Relative difference (%)")
+    axes[2].set_ylim([min(reldiff)-5, max(reldiff)+5])
+    axes[2].set_xlabel("(Lower is better)")
+    axes[2].grid(axis="y", alpha=0.3)
+
+    for ax in axes:
+        ax.tick_params(axis="x", rotation=20)
+
+    plt.show()

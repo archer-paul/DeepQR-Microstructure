@@ -109,3 +109,19 @@ def qr_transition_matrix(Ns, K=5):
     mat = mat[FINAL_ORDER]
 
     return mat
+
+def compute_hourly_intensity_qr(lambdas, df_train):
+    qr_trade_series = pd.concat({lvl: df["M"] for lvl, df in lambdas.items()})
+    df_qr = df_train.copy()
+    
+    df_qr["lambda_qr_trade"] = df_qr.set_index(["lvl", "q_before_event"]).index.map(qr_trade_series)
+    df_qr["lambda_qr_trade"] = df_qr["lambda_qr_trade"].fillna(0.0)
+    df_qr["expected_qr_trades"] = df_qr["lambda_qr_trade"] * df_qr["dtk_l"]
+    grouped_qr = df_qr.groupby("hour_last_event")
+    hourly_qr = grouped_qr["expected_qr_trades"].sum() / grouped_qr["dtk_l"].sum()
+    
+    global_expected_trades = (df_qr["lambda_qr_trade"] * df_qr["dtk_l"]).sum()
+    global_time = df_qr["dtk_l"].sum()
+    global_qr_intensity = global_expected_trades / global_time
+    
+    return hourly_qr, global_qr_intensity
