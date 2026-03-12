@@ -17,15 +17,15 @@ def build_qr_sequence(df, level):
 
     q_col = f"Q_{level}"
 
+    d = df[df["lvl"] == level]
+
     seq = pd.DataFrame({
-        "eta": df["type"],
-        "q": df[q_col],
-        "dt": df["dtk_l"]
+        "eta": d["type"],
+        "q": d[q_col],
+        "dt": d["dtk_l"]
     })
 
-    seq = seq.dropna()
-
-    return seq
+    return seq.dropna()
 
 
 def qr_mle_from_sequence(seq):
