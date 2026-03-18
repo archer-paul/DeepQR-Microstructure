@@ -1,5 +1,6 @@
 # Data and large files
 data/
+data2/
 *.csv
 *.gz
 *.zip
