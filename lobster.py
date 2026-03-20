@@ -205,18 +205,20 @@ def load_lobster_data(
     orderbook_csv = Path(orderbook_csv)
     
     # original dataframes
-    msg = pd.read_csv(message_csv, header=None, names=MSG_COLS)
-    ob = pd.read_csv(orderbook_csv, header=None, names=make_orderbook_cols(levels))
+    # Prevent column shifting by explicitly reading only the first 6 columns for msg 
+    # and the first 4*levels columns for orderbook
+    msg = pd.read_csv(message_csv, header=None, names=MSG_COLS, usecols=[0, 1, 2, 3, 4, 5], low_memory=False)
+    ob = pd.read_csv(orderbook_csv, header=None, names=make_orderbook_cols(levels), usecols=range(4 * levels), low_memory=False)
     
     if len(msg) != len(ob):
         raise ValueError(f"Row mismatch: message={len(msg)}, orderbook={len(ob)}")
     
     # types
     msg["time"] = msg["time"].astype(float)
-    msg["type"] = msg["type"].astype(int)
-    msg["size"] = msg["size"].astype(np.int64)
-    msg["price"] = msg["price"].astype(np.int64)
-    msg["direction"] = msg["direction"].astype(int)
+    msg["type"] = msg["type"].fillna(0).astype(int)
+    msg["size"] = msg["size"].fillna(0).astype(np.int64)
+    msg["price"] = msg["price"].fillna(0).astype(np.int64)
+    msg["direction"] = msg["direction"].fillna(0).astype(int)
     
     # map types -> L/C/M
     msg["type"] = msg["type"].apply(event_kind_from_type)
