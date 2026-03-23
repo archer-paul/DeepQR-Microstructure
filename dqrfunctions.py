@@ -16,7 +16,7 @@ DATA STRUCTURES AND MODEL DEFINITION (CLASS AND LOSS FUNCTION)
 # Build training dataset for NN model in PyTorch
 def build_dataset(df, use_hour=False, use_last_event=False):
     data = {
-        "q": torch.tensor(df["q_before_event"].values, dtype=torch.float32),
+        "q": torch.tensor(df["q"].values, dtype=torch.float32),
         "y": torch.tensor(df["event_id"].values, dtype=torch.long),
         "dt":torch.tensor(df["dtk_l"].values, dtype=torch.float32)    
     }
