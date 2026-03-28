@@ -44,3 +44,5 @@ Thumbs.db
 
 # Other
 .claude
+
+*.parquet
