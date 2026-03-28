@@ -226,7 +226,7 @@ def plot_scaling_and_xi(V, deltas, qs, title_left, title_right, eps=1e-12, fit_i
     xi, _ = log_regression_xi(m, deltas)
     H_R, a = estimate_HR_from_xi(qs, xi, fit_intercept=fit_intercept)
 
-    fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+    fig, ax = plt.subplots(2, 1, figsize=(5, 8))
 
     # ---- Left: scaling curves log m vs log Δ for multiple q
     x = np.log(deltas)
